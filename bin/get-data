@@ -1,0 +1,363 @@
+#!/usr/bin/env python
+"""
+Get FTIR dataset from EPA website.
+"""
+# --- Imports
+
+# Standard library
+import gc
+import json
+import logging
+import os
+from pathlib import Path
+import random
+import shutil
+import time
+from urllib.parse import urljoin, urlparse
+
+# External packages
+from bs4 import BeautifulSoup
+import pandas as pd
+import requests
+from requests.exceptions import RequestException
+from urllib3.exceptions import ReadTimeoutError
+from slugify import slugify
+from tqdm import tqdm
+import typer
+
+
+# --- Constants
+
+# Data source parameters
+_WEBPAGE_URL = "https://www3.epa.gov/ttn/emc/ftir/refcas.html"
+_HTML_TABLE_COLUMNS = [
+    "CAS Number",
+    "Compound Name",
+    "Symbol",
+    "Pathlength (m)",
+    "Temperature (C)",
+    "Concentration (ppm)",
+    "Resolution (cm^-1)",
+    ]
+_TABLE_COLUMNS = _HTML_TABLE_COLUMNS + ["id", "Data File", "Source URL"]
+
+# Request parameters
+_REQUEST_DELAYS = tuple(range(1, 8, 2))  # Unit: seconds. Average: 4s
+_REQUEST_TIMEOUT = 1  # Unit: seconds
+_REQUEST_MAX_RETRIES = 3
+_REQUEST_RETRY_DELAY = 60  # Unit: seconds
+
+# Script name
+_SCRIPT_NAME, _ = os.path.splitext(os.path.basename(__file__))
+
+# Logger
+_logger = logging.getLogger("get-data")
+
+
+# --- Main function
+
+def main(data_dir: Path = typer.Argument(
+            "data",
+            exists=False,
+            file_okay=False,
+            dir_okay=True,
+            writable=True,
+            readable=True,
+            help="Directory where dataset should be saved."),
+         use_delay: bool = typer.Option(
+            True, "-d", "--use-delay",
+            help="Use delay between data requests."),
+         verbose: bool = typer.Option(
+            False, "-v", "--verbose",
+            help="Show progress details."),
+         log_file: Path = typer.Option(
+            f"{_SCRIPT_NAME}.log", "-l",
+            exists=False,
+            file_okay=True,
+            dir_okay=False,
+            writable=True,
+            readable=True,
+            help="Log file.",
+            metavar="LOG_FILE")):
+    """
+    Get FTIR dataset from EPA website.
+    """
+    # pylint: disable=too-many-branches
+    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-statements
+
+    # --- Preparations
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, "INFO"),
+        filename=log_file,
+        format='[%(asctime)s]%(levelname)s:%(message)s')
+
+    # Emit parameters to log file
+    _logger.info("STARTED")
+    _logger.info("Source URL: %s", _WEBPAGE_URL)
+    cli_options = {
+        "DATA_DIR": str(data_dir),
+        "LOG_FILE": str(log_file),
+        "use-delay": use_delay,
+        }
+    _logger.info("CLI Options:%s", json.dumps(cli_options))
+
+    # Construct directory paths
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Initialize metadata records
+    metadata_records = []
+
+    # --- Get dataset
+
+    if verbose:
+        typer.echo("Retrieving dataset...")
+
+    # Get list of spectra
+    try:
+        response = requests.get(_WEBPAGE_URL, timeout=_REQUEST_TIMEOUT)
+    except Exception as error:
+        typer.echo(error, err=True)
+        raise typer.Abort()
+
+    if response.status_code != requests.codes.ok:  # pylint: disable=no-member
+        typer.echo("Failed to retrieve spectra table", err=True)
+        raise typer.Abort()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    table = soup.find("table")
+    table_rows = table.find_all("tr")
+
+    # Remove non-spectra rows
+    table_rows = table_rows[3:-1]
+
+    # Configure status and progress bars
+    if verbose:
+        progress_bar = tqdm(total=len(table_rows), unit="file", position=0)
+        status_bar = progress_bar
+    else:
+        progress_bar = tqdm(total=len(table_rows), unit="file", position=1)
+        status_bar = tqdm(total=0, position=0, bar_format='{desc}')
+
+    # Retrieve data files
+    for table_row in table_rows:
+        # --- Preparations
+
+        progress_bar.set_postfix(refresh=True)
+
+        # Extract metadata
+        cells = table_row.find_all("td")
+        record = {}
+        for i, column in enumerate(_HTML_TABLE_COLUMNS):
+            record[column] = ' '.join(cells[i].get_text().strip().split())
+
+        cas_number = record["CAS Number"]
+        compound_name = record["Compound Name"]
+
+        # --- Request data
+
+        # Get relative URL for data file
+        relative_data_url = cells[0].find("a").get("href")
+
+        # Skip compounds with missing URLS
+        if relative_data_url is None:
+            message = f"Data URL not found for {cas_number}"
+            _logger.warning(message)
+
+            # Update progress bars
+            update_status_bar(status_bar, message, verbose)
+            progress_bar.update()
+            continue
+
+        # Parse URL
+        path = os.path.basename(urlparse(relative_data_url).path)
+        record_id, ext = os.path.splitext(path)
+
+        # Emit status message
+        message = f"Retrieving data file for {record_id} " \
+                  f"({cas_number}, {compound_name})"
+        _logger.info(message)
+        if verbose:
+            progress_bar.write(f"{message}...")
+        else:
+            # Ensure that status message fits on one line
+            terminal_width, _ = shutil.get_terminal_size((80, 20))
+            message = f"{message[0:terminal_width-3]}..."
+
+            # Set status bar
+            status_bar.set_description_str(message)
+
+        # Skip URLs with invalid file extension
+        if ext != ".spc":
+            message = \
+                f"File extension of data URL for {record_id} is not .spc"
+            _logger.warning(message)
+
+            # Update progress bars
+            update_status_bar(status_bar, message, verbose)
+            progress_bar.update()
+            continue
+
+        # Download data file
+        compound_name = slugify(record["Compound Name"],
+                                replacements=[[',', ' ']])
+        data_file = f"{cas_number}--{compound_name}--{record_id}.spc"
+        data_path = os.path.join(data_dir, data_file)
+        data_url = (urljoin(_WEBPAGE_URL, relative_data_url))
+        try:
+            download_data_file(data_path, data_url, record_id,
+                               use_delay=use_delay)
+        except RuntimeError as error:
+            _logger.warning(error)
+
+            # Update progress bars
+            update_status_bar(status_bar, message, verbose)
+            progress_bar.update()
+            continue
+
+        # Update metadata records
+        record["id"] = record_id
+        record["Data File"] = data_file
+        record["Source URL"] = data_url
+        metadata_records.append(record)
+
+        # Emit status message
+        message = f"Successfullly retrieved data file for {record_id} " \
+                  f"({cas_number}, {compound_name})"
+        _logger.info(message)
+
+        # Update progress bar
+        progress_bar.update()
+
+    # Close progress bars
+    status_bar.close()
+    progress_bar.close()
+
+    # --- Save metadata
+
+    message = "Saving metadata"
+    _logger.info(message)
+    if verbose:
+        typer.echo(f"{message}...")
+
+    metadata = pd.DataFrame(data=metadata_records, columns=_TABLE_COLUMNS)
+    metadata.set_index("id", inplace=True)
+    metadata.to_csv(os.path.join(data_dir, "metadata.csv"))
+
+    message = "Successfully saved metadata"
+    _logger.info(message)
+
+    # --- Shutdown
+
+    # Emit parameters to log file
+    _logger.info("FINISHED")
+
+
+# --- Utility functions
+
+def update_status_bar(status_bar: tqdm,
+                      message: str,
+                      verbose: bool = False) -> None:
+    """
+    Update status bar.
+
+    Parameters
+    ----------
+    status_bar: tqdm object used to display status
+
+    message: message to display
+
+    verbose: flag indicating whether script is running in verbose mode
+    """
+    if verbose:
+        status_bar.write(message)
+    else:
+        # Ensure that status message fits on one line
+        terminal_width, _ = shutil.get_terminal_size((80, 20))
+        message = f"{message[0:terminal_width-3]}..."
+
+        # Set status bar
+        status_bar.set_description_str(message)
+
+
+def download_data_file(data_path: Path,
+                       url: str,
+                       record_id: str,
+                       use_delay: bool = True) -> None:
+    """
+    Download data for `record_id` from `url`.
+
+    Parameters
+    ----------
+    data_path: path to local file where data should saved
+
+    url: URL
+
+    record_id: id of data record
+
+    use_delay: flag indicating whether to use a delay between data requests
+    """
+    if use_delay:
+        time.sleep(random.choice(_REQUEST_DELAYS))
+
+    for request_count in range(1, _REQUEST_MAX_RETRIES + 1):
+
+        response = None
+        try:
+            response = requests.get(url, timeout=_REQUEST_TIMEOUT,
+                                    stream=True)
+        except RequestException as error:
+            error_type = type(error)
+            error_message = f"{error_type}({error})"
+
+        if response is not None:
+            # pylint: disable=no-member
+            if response.status_code == requests.codes.ok:
+                # Request succeeded. Attempt to save data to local file
+                downloaded_succeeded = False
+                with open(data_path, 'wb') as file_:
+                    try:
+                        shutil.copyfileobj(response.raw, file_)
+                        downloaded_succeeded = True
+                    except ReadTimeoutError as error:
+                        error_message = f"Timeout error. [caused by {error}]"
+
+                # Force garbage collection to avoid memory shortage if data
+                # files are large
+                del response
+                gc.collect()
+
+                # Exit loop if download is successful
+                if downloaded_succeeded:
+                    break
+
+            else:
+                error_message = \
+                    f"Server error. Status code={response.status_code}. " \
+                    f"Data={response.text}"
+
+        if request_count == _REQUEST_MAX_RETRIES:
+            message = \
+                f"Failed to retrieve data file for {record_id}. " \
+                f"Maximum number of retries ({_REQUEST_MAX_RETRIES}) " \
+                f"reached. URL={url} [caused by {error_message}]"
+            _logger.warning(message)
+            raise RuntimeError(message)
+
+        # Sleep for a while and try again
+        message = \
+            f"Failed to retrieve data file for {record_id}. " \
+            f"Failed GET request ({request_count} of " \
+            f"{_REQUEST_MAX_RETRIES}). URL={url}. " \
+            f"[caused by {error_message}]. " \
+            f"Sleeping for {_REQUEST_RETRY_DELAY}s... "
+        _logger.warning(message)
+        time.sleep(_REQUEST_RETRY_DELAY)
+
+
+# --- Run script
+
+if __name__ == "__main__":
+    typer.run(main)
