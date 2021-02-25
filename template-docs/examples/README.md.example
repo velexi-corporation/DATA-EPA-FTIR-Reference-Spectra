@@ -1,0 +1,76 @@
+DATASET NAME
+============
+
+___Authors___  
+CONTRIBUTOR NAME `<contributor@example.com>`
+
+------------------------------------------------------------------------------
+
+Contents
+--------
+
+1. [Overview][#1]
+
+    1.1. [License][#1.1]
+
+2. [Tools][#2]
+
+    2.1. [Software Dependencies][#2.1]
+
+    2.2. [Usage][#2.2]
+
+3. [Known Issues][#3]
+
+------------------------------------------------------------------------------
+
+## 1. Overview
+
+Brief description of the dataset.
+
+### 1.1. License
+
+See the LICENSE file for copyright and license information.
+
+------------------------------------------------------------------------------
+
+## 2. Tools
+
+List tools for creating and maintaining dataset.
+
+* Tool #1
+
+* Tool #2
+
+#### 2.1. Software Dependencies
+
+##### Base Requirements
+
+* Python (>=3.9)
+
+##### Python Packages ####
+
+See the `requirements.txt` file.
+
+### 2.2. Usage
+
+* Instructions for use of tools to create and maintain dataset.
+
+------------------------------------------------------------------------------
+
+## 3. Known Issues
+
+* List of known issues with the dataset.
+
+------------------------------------------------------------------------------
+
+[-----------------------------INTERNAL LINKS-----------------------------]: #
+
+[#1]: #1-overview
+[#1.1]: #11-license
+
+[#2]: #2-tools
+[#2.1]: #21-software-dependencies
+[#2.2]: #22-usage
+
+[#3]: #3-known-issues
+

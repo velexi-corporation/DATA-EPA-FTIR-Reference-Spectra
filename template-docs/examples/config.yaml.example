@@ -1,0 +1,38 @@
+# --- DVC repository parameters
+
+# Repository name
+repository_name: {{ REPOSITORY_NAME }}
+
+
+# --- Remote storage provider parameters
+
+# Storage provider
+#
+# Valid values: local, aws
+storage_provider: local
+
+# DVC name for remote storage
+#
+# Default: storage
+storage_name: storage
+
+
+# ------ Parameters for "local" remote storage
+#
+# - Only used if `storage_provider` is set to "local"
+
+# Directory on local file system to use for DVC remote storage
+local_storage_dir: {{ /PATH/TO/LOCAL/STORAGE }}
+
+
+# ------ Parameters for AWS remote storage
+#
+# - Only used if `storage_provider` is set to "aws"
+
+# AWS profile that DVC should use to connect to AWS
+#
+# Default: default
+aws_profile: default
+
+# S3 bucket used by DVC for remote storage
+aws_s3_bucket: {{ S3_BUCKET }}
